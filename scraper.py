@@ -1,42 +1,18 @@
-"""
-=============================================================================
- RemoteOK Job Scraper  —  Production-Ready Final Version
- Target  : https://remoteok.com/api?tag=<query>
- Output  : RemoteOK_Jobs_<timestamp>.xlsx
-=============================================================================
- Verified requirements:
-   ✅ Runs without errors
-   ✅ Excel correctly formatted with all required columns
-   ✅ Data reflects live careers page accurately
-   ✅ Missing data handled gracefully (blank cells, no crash)
-   ✅ Pagination supported (API handles it; HTML fallback included)
-=============================================================================
- Usage:
-   python scraper.py                            # default: python, 50 jobs
-   python scraper.py --query "react" --max 30
-   python scraper.py --selftest                 # verify all requirements
-=============================================================================
-"""
-
 import argparse
 import logging
-import time
+import os
 import re
 import sys
-import os
+import time
 from datetime import datetime
 from urllib.parse import urljoin
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-
-# ──────────────────────────────────────────────────────────────────────────────
-# LOGGING
-# ──────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,16 +21,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ──────────────────────────────────────────────────────────────────────────────
-
-API_BASE        = "https://remoteok.com/api"
-HTML_BASE       = "https://remoteok.com"
-COMPANY_NAME    = "RemoteOK"
-REQUEST_DELAY   = 1.5
+API_BASE = "https://remoteok.com/api"
+HTML_BASE = "https://remoteok.com"
+COMPANY_NAME = "RemoteOK"
+REQUEST_DELAY = 1.5
 REQUEST_TIMEOUT = 20
-MAX_RETRIES     = 3
+MAX_RETRIES = 3
 
 HEADERS = {
     "User-Agent": (
@@ -85,17 +57,8 @@ EXCEL_COLUMNS = [
     "JobDescriptionSummary",
 ]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ REQUIREMENT 4 — GRACEFUL MISSING DATA HANDLER
-# ──────────────────────────────────────────────────────────────────────────────
 
 def safe_get(data: dict, *keys, fallback: str = "") -> str:
-    """
-    Safely retrieve a nested value from a dict.
-    Returns `fallback` (default "") instead of crashing on missing keys or None.
-
-    Requirement: 'Missing data points leave cells blank — no crash.'
-    """
     val = data
     for key in keys:
         if not isinstance(val, dict):
@@ -106,10 +69,6 @@ def safe_get(data: dict, *keys, fallback: str = "") -> str:
     return str(val).strip() if val else fallback
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# HTTP SESSION
-# ──────────────────────────────────────────────────────────────────────────────
-
 def create_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -117,11 +76,6 @@ def create_session() -> requests.Session:
 
 
 def fetch_url(url: str, session: requests.Session, as_json: bool = False):
-    """
-    Fetch a URL with retry logic.
-    Returns parsed JSON (dict/list) or BeautifulSoup object.
-    Returns None on all failures — never raises.
-    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info("Fetching (attempt %d): %s", attempt, url)
@@ -130,44 +84,29 @@ def fetch_url(url: str, session: requests.Session, as_json: bool = False):
             if as_json:
                 return r.json()
             return BeautifulSoup(r.text, "html.parser")
-
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code
             logger.warning("HTTP %d for %s", code, url)
             if code in {403, 404, 410}:
                 return None
             time.sleep(REQUEST_DELAY * attempt)
-
         except requests.exceptions.RequestException as e:
             logger.warning("Request error (attempt %d): %s", attempt, e)
             time.sleep(REQUEST_DELAY * attempt)
-
         except ValueError:
             logger.error("JSON decode error for %s", url)
             return None
-
     logger.error("All %d attempts failed: %s", MAX_RETRIES, url)
     return None
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# HTML UTILITIES
-# ──────────────────────────────────────────────────────────────────────────────
-
 def strip_html(raw: str) -> str:
-    """Strip all HTML tags and return clean plain text."""
     if not raw:
         return ""
     return BeautifulSoup(raw, "html.parser").get_text(separator=" ", strip=True)
 
 
 def extract_skills(text: str, api_tags: list = None) -> str:
-    """
-    Build SkillsRequired from two sources:
-      1. API-provided tags (most reliable)
-      2. Keyword scan of description text (fallback)
-    Always returns "" if nothing found — never crashes.
-    """
     skills_from_tags = []
     if api_tags and isinstance(api_tags, list):
         skills_from_tags = [t.strip().title() for t in api_tags if t.strip()]
@@ -187,21 +126,17 @@ def extract_skills(text: str, api_tags: list = None) -> str:
 
 
 def extract_experience(text: str) -> str:
-    """Extract years-of-experience phrase from free text. Returns '' if absent."""
     if not text:
         return ""
     m = re.search(
         r"(\d+\+?\s*(?:to\s*\d+\s*)?years?\s*(?:of\s*)?(?:experience|exp)?)",
-        text, re.IGNORECASE,
+        text,
+        re.IGNORECASE,
     )
     return m.group(1).strip() if m else ""
 
 
 def extract_salary(raw: dict, text: str = "") -> str:
-    """
-    Build salary string from API fields first, then regex scan of text.
-    Returns "" gracefully if no salary data is present.
-    """
     s_min = raw.get("salary_min")
     s_max = raw.get("salary_max")
     if s_min and s_max:
@@ -209,7 +144,6 @@ def extract_salary(raw: dict, text: str = "") -> str:
     if s_min:
         return f"${int(s_min):,}+"
 
-    # Fallback: scan description text
     if text:
         m = re.search(
             r"(\$[\d,]+(?:\s*[-–]\s*\$[\d,]+)?(?:\s*(?:k|K|USD|/yr|annually))?)",
@@ -220,50 +154,25 @@ def extract_salary(raw: dict, text: str = "") -> str:
     return ""
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ REQUIREMENT 3 — LIVE API DATA (primary path)
-# ──────────────────────────────────────────────────────────────────────────────
-
 def fetch_jobs_from_api(tag: str, session: requests.Session) -> list:
-    """
-    Fetch all jobs for a tag from RemoteOK's free public JSON API.
-    Single call returns everything — no pagination needed at API level.
-    Returns [] on any failure.
-    """
-    url  = f"{API_BASE}?tag={tag}"
+    url = f"{API_BASE}?tag={tag}"
     data = fetch_url(url, session, as_json=True)
-
     if not data or not isinstance(data, list):
         return []
-
-    # First element is a legal metadata object, not a job — filter it out
     jobs = [item for item in data if item.get("id") and item.get("position")]
     logger.info("API → %d raw jobs for tag '%s'", len(jobs), tag)
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ REQUIREMENT 5 — PAGINATION (HTML fallback path)
-# ──────────────────────────────────────────────────────────────────────────────
-
 def handle_pagination(soup: BeautifulSoup, current_url: str) -> str | None:
-    """
-    Detect the 'Next' page link using three strategies.
-    Returns absolute URL of next page, or None if last page.
-
-    Requirement: 'Script handles pagination if present on the target site.'
-    """
-    # Strategy 1 — semantic <a rel="next">
     tag = soup.find("a", rel="next")
     if tag and tag.get("href"):
         return urljoin(HTML_BASE, tag["href"])
 
-    # Strategy 2 — link text contains "next / › / »"
     for a in soup.find_all("a", href=True):
         if re.search(r"next|›|»", a.get_text(strip=True), re.IGNORECASE):
             return urljoin(HTML_BASE, a["href"])
 
-    # Strategy 3 — pagination container with active/current element
     pagination = soup.select_one(".pagination, nav[aria-label='pagination']")
     if pagination:
         active = pagination.find("li", class_=re.compile(r"active|current", re.I))
@@ -278,15 +187,9 @@ def handle_pagination(soup: BeautifulSoup, current_url: str) -> str | None:
 
 
 def fetch_jobs_from_html(tag: str, session: requests.Session, max_pages: int = 5) -> list:
-    """
-    HTML scrape fallback (used only if API is unavailable).
-    Loops through pages using handle_pagination() until exhausted.
-
-    Requirement: 'Handles pagination if present on the target site.'
-    """
-    raw_jobs  = []
-    page_url  = f"{HTML_BASE}/remote-{tag}-jobs"
-    page_num  = 1
+    raw_jobs = []
+    page_url = f"{HTML_BASE}/remote-{tag}-jobs"
+    page_num = 1
 
     while page_url and page_num <= max_pages:
         logger.info("HTML fallback — page %d: %s", page_num, page_url)
@@ -301,16 +204,16 @@ def fetch_jobs_from_html(tag: str, session: requests.Session, max_pages: int = 5
             link = card.find("a", href=True)
             if not link:
                 continue
-            title_tag  = card.select_one("span.title")
+            title_tag = card.select_one("span.title")
             region_tag = card.select_one("span.region, .region, .location")
             raw_jobs.append({
                 "position": title_tag.get_text(strip=True) if title_tag else "",
                 "location": region_tag.get_text(strip=True) if region_tag else "",
-                "url"     : urljoin(HTML_BASE, link["href"]),
-                "tags"    : [],
+                "url": urljoin(HTML_BASE, link["href"]),
+                "tags": [],
                 "description": "",
-                "salary_min" : None,
-                "salary_max" : None,
+                "salary_min": None,
+                "salary_max": None,
             })
 
         next_url = handle_pagination(soup, page_url)
@@ -323,49 +226,35 @@ def fetch_jobs_from_html(tag: str, session: requests.Session, max_pages: int = 5
     return raw_jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ REQUIREMENT 4 — EXTRACT JOB DETAILS (missing-data safe)
-# ──────────────────────────────────────────────────────────────────────────────
-
 def extract_job_details(raw: dict) -> dict:
-    """
-    Map one raw job dict → our 7-column structured dict.
-    Every field defaults to "" if data is absent — never crashes.
-
-    Requirement: 'Gracefully handles missing data — blank cells, no crash.'
-    """
     try:
-        title       = safe_get(raw, "position")
-        location    = safe_get(raw, "location") or "Remote – Worldwide"
-        job_url     = safe_get(raw, "url")
+        title = safe_get(raw, "position")
+        location = safe_get(raw, "location") or "Remote – Worldwide"
+        job_url = safe_get(raw, "url")
         description = strip_html(safe_get(raw, "description"))
-        summary     = description[:300].strip()
-        salary      = extract_salary(raw, description)
-        skills      = extract_skills(description, raw.get("tags", []))
-        experience  = extract_experience(description)
+        summary = description[:300].strip()
+        salary = extract_salary(raw, description)
+        skills = extract_skills(description, raw.get("tags", []))
+        experience = extract_experience(description)
 
-        # Ensure absolute URL
         if job_url and not job_url.startswith("http"):
             job_url = urljoin(HTML_BASE, job_url)
 
         return {
-            "JobTitle"             : title,
-            "Location"             : location,
-            "ExperienceRequired"   : experience,
-            "SkillsRequired"       : skills,
-            "Salary"               : salary,
-            "JobURL"               : job_url,
+            "JobTitle": title,
+            "Location": location,
+            "ExperienceRequired": experience,
+            "SkillsRequired": skills,
+            "Salary": salary,
+            "JobURL": job_url,
             "JobDescriptionSummary": summary,
         }
-
     except Exception as exc:
-        # Absolute safety net — log and return blank row instead of crashing
         logger.warning("extract_job_details error (skipping row): %s", exc)
         return {col: "" for col in EXCEL_COLUMNS}
 
 
 def parse_jobs(raw_jobs: list, max_results: int) -> list:
-    """De-duplicate by URL, cap at max_results, skip blank titles."""
     jobs, seen = [], set()
 
     for raw in raw_jobs:
@@ -373,7 +262,6 @@ def parse_jobs(raw_jobs: list, max_results: int) -> list:
             break
 
         job = extract_job_details(raw)
-
         if not job["JobTitle"]:
             continue
         if job["JobURL"] in seen:
@@ -393,94 +281,64 @@ def parse_jobs(raw_jobs: list, max_results: int) -> list:
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ REQUIREMENT 2 — EXCEL: ALL COLUMNS + PROFESSIONAL FORMATTING
-# ──────────────────────────────────────────────────────────────────────────────
-
 def style_excel(filepath: str) -> None:
-    """
-    Apply full professional Excel formatting:
-      • Dark navy bold header row
-      • Alternating white / light-blue data rows
-      • Thin cell borders
-      • Frozen top row
-      • Auto-filter on all columns
-      • Optimised column widths
-      • Arial font throughout
-
-    Requirement: 'Excel file correctly formatted with all required columns.'
-    """
     wb = load_workbook(filepath)
     ws = wb.active
     ws.title = "Jobs"
 
-    # Colour palette
-    HEADER_FILL = PatternFill("solid", start_color="1F3864", end_color="1F3864")
-    ROW_EVEN    = PatternFill("solid", start_color="FFFFFF", end_color="FFFFFF")
-    ROW_ODD     = PatternFill("solid", start_color="EEF2FF", end_color="EEF2FF")
-    HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    CELL_FONT   = Font(name="Arial", size=10)
-    CELL_BORDER = Border(
+    header_fill = PatternFill("solid", start_color="1F3864", end_color="1F3864")
+    row_even = PatternFill("solid", start_color="FFFFFF", end_color="FFFFFF")
+    row_odd = PatternFill("solid", start_color="EEF2FF", end_color="EEF2FF")
+    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+    cell_font = Font(name="Arial", size=10)
+    cell_border = Border(
         bottom=Side(style="thin", color="CCCCCC"),
-        right =Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
     )
 
-    # Header row
     for cell in ws[1]:
-        cell.font      = HEADER_FONT
-        cell.fill      = HEADER_FILL
+        cell.font = header_font
+        cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border    = CELL_BORDER
+        cell.border = cell_border
     ws.row_dimensions[1].height = 32
 
-    # Data rows — alternating shading
     for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        fill = ROW_EVEN if row_idx % 2 == 0 else ROW_ODD
+        fill = row_even if row_idx % 2 == 0 else row_odd
         for cell in row:
-            cell.font      = CELL_FONT
-            cell.fill      = fill
+            cell.font = cell_font
+            cell.fill = fill
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-            cell.border    = CELL_BORDER
+            cell.border = cell_border
 
-    # Column widths (tuned per column content)
     col_widths = {
-        "JobTitle"            : 38,
-        "Location"            : 24,
-        "ExperienceRequired"  : 20,
-        "SkillsRequired"      : 48,
-        "Salary"              : 24,
-        "JobURL"              : 52,
+        "JobTitle": 38,
+        "Location": 24,
+        "ExperienceRequired": 20,
+        "SkillsRequired": 48,
+        "Salary": 24,
+        "JobURL": 52,
         "JobDescriptionSummary": 62,
     }
     for idx, col_name in enumerate(EXCEL_COLUMNS, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = col_widths.get(col_name, 20)
 
-    ws.freeze_panes = "A2"               # freeze header
-    ws.auto_filter.ref = ws.dimensions   # dropdown filters on every column
-
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
     wb.save(filepath)
     logger.info("Formatting applied → %s", filepath)
 
 
 def save_to_excel(jobs: list) -> tuple:
-    """
-    Convert job list → pandas DataFrame → styled .xlsx.
-    Ensures ALL 7 required columns exist even if data is incomplete.
-    Requirement: 'Excel has all required columns. No index. Clean names.'
-    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename  = f"{COMPANY_NAME}_Jobs_{timestamp}.xlsx"
+    filename = f"{COMPANY_NAME}_Jobs_{timestamp}.xlsx"
 
     df = pd.DataFrame(jobs)
-
-    # Guarantee every required column exists (fill missing with "")
     for col in EXCEL_COLUMNS:
         if col not in df.columns:
             df[col] = ""
 
-    df = df[EXCEL_COLUMNS]              # enforce exact column order
-    df = df.fillna("")                  # replace any NaN with blank string
-
+    df = df[EXCEL_COLUMNS].fillna("")
     df.to_excel(filename, index=False, engine="openpyxl")
     logger.info("Wrote %d rows → %s", len(df), filename)
 
@@ -488,22 +346,13 @@ def save_to_excel(jobs: list) -> tuple:
     return filename, df
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ✅ SELF-TEST MODE — verifies all 4 requirements without internet
-# ──────────────────────────────────────────────────────────────────────────────
-
 def run_self_test() -> None:
-    """
-    Offline verification of all four requirements using synthetic data.
-    Tests missing-data handling explicitly with null/empty fields.
-    """
     print("\n" + "═" * 70)
     print("  SELF-TEST — Verifying all requirements offline")
     print("═" * 70)
 
-    # Synthetic jobs — mix of complete and intentionally incomplete records
     test_raw_jobs = [
-        {   # ✅ Complete record
+        {
             "id": "1", "position": "Senior Python Developer",
             "location": "Remote – US Only",
             "url": "https://remoteok.com/jobs/1",
@@ -512,7 +361,7 @@ def run_self_test() -> None:
                            "Salary $120,000 – $150,000. Docker and CI/CD required.</p>",
             "salary_min": 120000, "salary_max": 150000,
         },
-        {   # ✅ Missing salary → blank cell
+        {
             "id": "2", "position": "React Frontend Engineer",
             "location": "Remote – Europe",
             "url": "https://remoteok.com/jobs/2",
@@ -520,7 +369,7 @@ def run_self_test() -> None:
             "description": "<p>3+ years experience. TypeScript and Node.js required.</p>",
             "salary_min": None, "salary_max": None,
         },
-        {   # ✅ Missing location → defaults to "Remote – Worldwide"
+        {
             "id": "3", "position": "Data Engineer",
             "location": "",
             "url": "https://remoteok.com/jobs/3",
@@ -528,7 +377,7 @@ def run_self_test() -> None:
             "description": "<p>Spark, Kafka, Airflow, SQL. 4+ years experience in data pipelines.</p>",
             "salary_min": 95000, "salary_max": None,
         },
-        {   # ✅ Missing description → blank summary and experience
+        {
             "id": "4", "position": "DevOps Engineer",
             "location": "Remote – APAC",
             "url": "https://remoteok.com/jobs/4",
@@ -536,7 +385,7 @@ def run_self_test() -> None:
             "description": "",
             "salary_min": None, "salary_max": None,
         },
-        {   # ✅ Missing tags → skills extracted via description keywords only
+        {
             "id": "5", "position": "Machine Learning Engineer",
             "location": "Remote – Worldwide",
             "url": "https://remoteok.com/jobs/5",
@@ -544,13 +393,13 @@ def run_self_test() -> None:
             "description": "<p>Deep knowledge of TensorFlow, PyTorch, Python, and Docker. 6+ years exp.</p>",
             "salary_min": 140000, "salary_max": 170000,
         },
-        {   # ✅ Duplicate URL — should be skipped
+        {
             "id": "1-dup", "position": "Senior Python Developer (duplicate)",
             "location": "Remote – US Only",
             "url": "https://remoteok.com/jobs/1",
             "tags": [], "description": "", "salary_min": None, "salary_max": None,
         },
-        {   # ✅ No title — should be skipped entirely
+        {
             "id": "6", "position": "",
             "location": "Remote – Worldwide",
             "url": "https://remoteok.com/jobs/6",
@@ -562,7 +411,6 @@ def run_self_test() -> None:
     FAIL = "  ❌ FAIL"
     results = []
 
-    # ── Test 1: No crash ──────────────────────────────────────────────────────
     try:
         jobs = parse_jobs(test_raw_jobs, max_results=100)
         results.append((PASS, "Req 1 — Script runs without errors"))
@@ -570,7 +418,6 @@ def run_self_test() -> None:
         results.append((FAIL, f"Req 1 — Crashed: {e}"))
         jobs = []
 
-    # ── Test 2: All required columns present ──────────────────────────────────
     try:
         filename, df = save_to_excel(jobs)
         missing_cols = [c for c in EXCEL_COLUMNS if c not in df.columns]
@@ -582,7 +429,6 @@ def run_self_test() -> None:
         results.append((FAIL, f"Req 2 — Excel save error: {e}"))
         filename, df = None, pd.DataFrame()
 
-    # ── Test 3: Data reflects source ─────────────────────────────────────────
     if not df.empty:
         row = df[df["JobTitle"] == "Senior Python Developer"].iloc[0]
         if "Python" in row["SkillsRequired"] and row["JobURL"]:
@@ -590,25 +436,19 @@ def run_self_test() -> None:
         else:
             results.append((FAIL, "Req 3 — Data mismatch"))
 
-    # ── Test 4: Missing data → blank cells, not crashes ───────────────────────
     if not df.empty:
         checks = []
-        # Row with no salary should have blank Salary
         no_salary = df[df["JobTitle"] == "React Frontend Engineer"]
         if not no_salary.empty and no_salary.iloc[0]["Salary"] == "":
             checks.append("salary blank ✓")
-        # Row with no location should default to "Remote – Worldwide"
         no_loc = df[df["JobTitle"] == "Data Engineer"]
         if not no_loc.empty and no_loc.iloc[0]["Location"] == "Remote – Worldwide":
             checks.append("location default ✓")
-        # Row with no description should have blank summary
         no_desc = df[df["JobTitle"] == "DevOps Engineer"]
         if not no_desc.empty and no_desc.iloc[0]["JobDescriptionSummary"] == "":
             checks.append("description blank ✓")
-        # Duplicate should be excluded (5 unique + 0 dup + 0 no-title = 5 rows)
         if len(df) == 5:
             checks.append("duplicate excluded ✓")
-        # No-title row should be excluded
         if df[df["JobTitle"] == ""].empty:
             checks.append("empty title excluded ✓")
 
@@ -617,7 +457,6 @@ def run_self_test() -> None:
         else:
             results.append((FAIL, f"Req 4 — Some checks failed. Passed: {checks}"))
 
-    # ── Test 5: Pagination logic compiles and runs ────────────────────────────
     try:
         dummy_soup = BeautifulSoup('<a rel="next" href="/remote-jobs?page=2">Next</a>', "html.parser")
         next_url = handle_pagination(dummy_soup, "https://remoteok.com/remote-jobs")
@@ -628,7 +467,6 @@ def run_self_test() -> None:
     except Exception as e:
         results.append((FAIL, f"Req 5 — Pagination error: {e}"))
 
-    # ── Print results ─────────────────────────────────────────────────────────
     print()
     for status, message in results:
         print(f"{status}  {message}")
@@ -651,22 +489,10 @@ def run_self_test() -> None:
     print("\n" + "═" * 70 + "\n")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MAIN SCRAPE ORCHESTRATION
-# ──────────────────────────────────────────────────────────────────────────────
-
 def scrape(query: str, max_results: int) -> list:
-    """
-    Full pipeline:
-      1. Try API (fast, reliable, no blocking)
-      2. Fall back to HTML scraping with pagination if API fails
-    """
-    session  = create_session()
-
-    # Primary — JSON API
+    session = create_session()
     raw_jobs = fetch_jobs_from_api(tag=query, session=session)
 
-    # Fallback — HTML with pagination
     if not raw_jobs:
         logger.warning("API returned no data. Falling back to HTML scraping with pagination...")
         raw_jobs = fetch_jobs_from_html(tag=query, session=session, max_pages=5)
@@ -677,10 +503,6 @@ def scrape(query: str, max_results: int) -> list:
 
     return parse_jobs(raw_jobs, max_results=max_results)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -694,28 +516,19 @@ Examples:
   python scraper.py --selftest
         """,
     )
-    parser.add_argument("--query",    "-q", default="python",
-                        help="Job tag to search (default: python)")
-    parser.add_argument("--max",      "-m", type=int, default=50,
-                        help="Max jobs to collect (default: 50)")
-    parser.add_argument("--selftest", action="store_true",
-                        help="Run offline requirement verification and exit")
+    parser.add_argument("--query", "-q", default="python", help="Job tag to search (default: python)")
+    parser.add_argument("--max", "-m", type=int, default=50, help="Max jobs to collect (default: 50)")
+    parser.add_argument("--selftest", action="store_true", help="Run offline requirement verification and exit")
     return parser.parse_args()
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
 
-    # ── Self-test mode ────────────────────────────────────────────────────────
     if args.selftest:
         run_self_test()
         sys.exit(0)
 
-    # ── Live scrape ───────────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info("  RemoteOK Job Scraper")
     logger.info("  Query : %s", args.query)
@@ -730,7 +543,6 @@ def main():
 
     output_file, df = save_to_excel(jobs)
 
-    # DataFrame preview
     print("\n" + "═" * 110)
     print("  SAMPLE OUTPUT — First 5 rows")
     print("═" * 110)
